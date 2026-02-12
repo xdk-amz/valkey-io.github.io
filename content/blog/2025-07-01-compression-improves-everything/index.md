@@ -64,9 +64,37 @@ The headline numbers are consistent regardless of throughput or concurrency — 
 | zstd (level 3) | 10.9 MB | 49.2% |
 | LZ4 (level 0) | 15.5 MB | 27.8% |
 
-Zstd saves nearly twice as much memory as LZ4 on this JSON workload. These are total server memory reductions as reported by Valkey's `INFO memory`, including per-key overhead that doesn't compress.
+Zstd saves nearly twice as much memory as LZ4 on this JSON workload. But ~2KB JSON payloads are just one scenario. In practice, you're caching all kinds of data at all kinds of sizes. We benchmarked three common data types — JSON, HTML, and session data — across small, medium, and large value sizes to show what savings actually look like across real workloads.
+
+### Memory Savings by Data Type and Value Size
+
+| Data Type | Value Size | Avg Bytes | zstd Savings | LZ4 Savings |
+|-----------|-----------|-----------|-------------|------------|
+| JSON | Small | 38 | 0.0% | 0.0% |
+| JSON | Medium | 98 | 0.8% | 0.0% |
+| JSON | Large | 461 | 27.6% | 15.0% |
+| JSON | Extra-Large | 1,884 | 49.3% | 31.8% |
+| HTML | Small | 193 | 20.0% | 10.5% |
+| HTML | Medium | 556 | 37.2% | 27.9% |
+| HTML | Large | 1,247 | 49.0% | 38.9% |
+| Session | Small | 198 | 11.8% | 0.0% |
+| Session | Medium | 480 | 16.9% | 0.0% |
+| Session | Large | 951 | 24.1% | 11.5% |
+
+A few patterns jump out:
+
+**Value size matters more than data type.** Below ~100 bytes, neither algorithm saves meaningful memory — the 5-byte header overhead and Valkey's per-key metadata dominate. Above ~500 bytes, both algorithms deliver substantial savings across all data types.
+
+**HTML compresses well.** Repeated tags, attributes, and structural patterns give both algorithms plenty to work with. Even small HTML fragments (~193 bytes) see 10–20% savings, and large fragments hit 39–49%.
+
+**Session data is the toughest.** Session payloads tend to be more random — UUIDs, tokens, timestamps — with less structural repetition. zstd still manages 12–24% savings, but LZ4 struggles with smaller session values (0% savings at ~200 and ~480 bytes) because the compressed output isn't smaller than the original after accounting for the header.
+
+**zstd consistently beats LZ4 on compression ratio.** Across every data type and size, zstd saves more memory. The gap is widest on highly compressible data and narrowest on small or low-redundancy data.
+
+These are total server memory reductions as reported by Valkey's `INFO memory` — they include per-key overhead (key storage, metadata, allocator alignment) that doesn't compress, so the effective memory ratio is lower than the raw algorithm compression ratio you'd see compressing the same data outside of Valkey.
 
 ![Memory comparison: zstd vs LZ4 vs uncompressed](graph_parallel_memory.png)
+![Memory savings across data types](graph_memory_savings.png)
 
 ## The Core Tradeoff: Memory vs Throughput
 
@@ -95,12 +123,13 @@ One important note: batching is the real throughput lever. Going from batch size
 
 ## Choosing the Right Configuration
 
-**Start with LZ4** if throughput matters. Switch to zstd if you need maximum memory savings and have throughput headroom. Skip compression entirely for values under 100 bytes or already-compressed data (images, video, pre-compressed content).
+**Start with LZ4** if throughput matters. Switch to zstd if you need maximum memory savings and have throughput headroom. The savings you'll see depend heavily on your data type and value size — HTML compresses best, session data compresses least, and anything under 100 bytes isn't worth compressing. Skip compression entirely for already-compressed data (images, video, pre-compressed content).
 
 For value sizes:
-- Under 100 bytes: skip compression — the 5-byte header overhead negates savings.
-- 100–500 bytes: expect 12–37% savings depending on data type. Worth enabling.
-- Over 500 bytes: expect 24–49% savings. Strongly recommended.
+- **Under 100 bytes**: Skip compression. Neither algorithm saves meaningful memory at this size — the 5-byte header overhead and Valkey's per-key metadata dominate (38-byte JSON = 0.0% savings, 98-byte JSON = 0.8% zstd / 0.0% LZ4).
+- **100–500 bytes**: Savings vary by data type. HTML compresses well even at ~193 bytes (20% zstd / 10.5% LZ4). Session data sees 12% zstd savings at ~198 bytes. LZ4 may not help at this size for session data (0% savings). Worth enabling with zstd; test with LZ4.
+- **500–1,000 bytes**: Solid savings across all data types. Expect 17–49% with zstd and 0–39% with LZ4 depending on data type. HTML compresses best; session data compresses least.
+- **Over 1,000 bytes**: Strongly recommended. Expect 24–50% with zstd and 12–39% with LZ4. JSON and HTML hit 49% zstd savings at 1.2–1.9KB.
 
 For batched operations: prefer LZ4. Zstd throughput drops significantly as batch size increases.
 
