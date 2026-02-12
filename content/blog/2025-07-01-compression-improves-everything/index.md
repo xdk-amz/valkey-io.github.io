@@ -1,6 +1,6 @@
 +++
-title = "Transparent Compression in Valkey GLIDE: Reduce Memory With a Single Line of Code"
-description = "Learn how to enable automatic compression in Valkey GLIDE to reduce memory usage by up to 49% without modifying your application code."
+title = "Transparent Compression in Valkey GLIDE for Go: Reduce Memory With a Single Line of Code"
+description = "Learn how to enable automatic compression in Valkey GLIDE's Go client to reduce memory usage by up to 49% without modifying your application code."
 date = 2026-01-27 01:01:01
 authors = ["dknowles"]
 
@@ -12,26 +12,26 @@ If you're caching JSON API responses, storing user sessions, or buffering HTML f
 
 Transparent compression in [Valkey GLIDE](https://github.com/valkey-io/valkey-glide) offers a seamless solution to this problem. When you write data with a `SET` command, GLIDE compresses it before sending it to the server. When you read it back with `GET`, GLIDE decompresses it automatically. Your application code doesn't change — you just flip a switch in the client configuration:
 
-```python
-from glide import (
-    GlideClient,
-    GlideClientConfiguration,
-    NodeAddress,
-    CompressionConfiguration,
+```go
+import (
+    glide "github.com/valkey-io/valkey-glide/go/v2"
+    "github.com/valkey-io/valkey-glide/go/v2/config"
 )
 
-config = GlideClientConfiguration(
-    addresses=[NodeAddress(host="localhost", port=6379)],
-    compression=CompressionConfiguration(enabled=True)  # That's it.
-)
-client = await GlideClient.create(config)
+cfg := config.NewClientConfiguration().
+    WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
+    WithCompressionConfiguration(
+        config.NewCompressionConfiguration(), // That's it.
+    )
 
-# Everything else stays exactly the same
-await client.set("user:1001:profile", json.dumps(user_data))
-profile = json.loads(await client.get("user:1001:profile"))
+client, err := glide.NewClient(cfg)
+
+// Everything else stays exactly the same
+client.Set(ctx, "user:1001:profile", string(userDataJSON))
+result, _ := client.Get(ctx, "user:1001:profile")
 ```
 
-In our benchmarks, this single configuration change delivered 28–49% memory savings depending on algorithm choice, with LZ4 showing zero measurable throughput impact and Zstandard (zstd) nearly halving memory usage at the cost of some write throughput. This post walks through how the feature works, what the benchmarks show, and how to choose the right settings for your workload.
+In our benchmarks using the Go client, this single configuration change delivered 28–49% memory savings depending on algorithm choice, with LZ4 showing near-zero throughput impact and Zstandard (zstd) nearly halving memory usage at a moderate write throughput cost. This post walks through how the feature works, what the benchmarks show, and how to choose the right settings for your workload.
 
 ## How It Works
 
@@ -42,7 +42,7 @@ When you execute a `SET` command with compression enabled, GLIDE runs through a 
 3. Is the compressed result actually smaller than the original? If not, send the original instead.
 4. Prepend a 5-byte header that identifies the data as GLIDE-compressed, and send it to the server.
 
-On the read path, the process reverses. GLIDE checks for the header, decompresses if present, and returns the original value. If the header isn't there, the value is returned as-is. This allows  compression-enabled clients to seamlessly read uncompressed data written by older clients.
+On the read path, the process reverses. GLIDE checks for the header, decompresses if present, and returns the original value. If the header isn't there, the value is returned as-is. This allows compression-enabled clients to seamlessly read uncompressed data written by older clients.
 
 GLIDE uses a 5-byte header (`[Magic Prefix: 3 bytes][Version: 1 byte][Backend ID: 1 byte]`) to tag compressed values. The backend ID means a zstd-configured client can read LZ4-compressed data and vice versa. All GLIDE language bindings (Python, Node.js, Java, Go) share the same header format, so compressed data written from one language can be read from another.
 
@@ -50,9 +50,11 @@ A few safety-by-default choices keep compression from ever getting in the way: i
 
 ## Benchmark Results
 
-We benchmarked compression using a parallel multi-process architecture on Amazon EC2 r7g.2xlarge instances (8 vCPUs, 64 GB RAM, AWS Graviton3) with the client and Valkey 8.0 server in the same AWS VPC. The test corpus was JSON documents averaging ~1,884 bytes per value in order to push compression to its limits. We swept a matrix of configurations across client counts, parallel processes, and pipeline batch sizes.
+We benchmarked compression using the Go GLIDE client on Amazon EC2 r7g.2xlarge instances (8 vCPUs, 64 GB RAM, AWS Graviton3) with the client and Valkey 8.0 server in the same AWS VPC. The test corpus was JSON documents averaging ~1,884 bytes per value. We swept a matrix of 80 configurations across goroutine counts (1, 2, 4, 8, 10, 25, 100, 1000) and pipeline batch sizes (1, 5, 10, 20, 50).
 
-The compression itself happens in Rust via FFI and is identical across all GLIDE language bindings, though baseline throughput varies by language.
+Unlike the Python client which needs separate parallel processes to work around the GIL, Go handles all concurrency natively via goroutines. Each goroutine gets its own GLIDE client, which maps to its own Rust Tokio runtime under the hood — this allows compression work to parallelize across OS threads without any special configuration.
+
+The compression itself happens in Rust via FFI and is identical across all GLIDE language bindings.
 
 ## Memory Savings
 
@@ -60,104 +62,102 @@ The headline numbers are consistent regardless of throughput or concurrency — 
 
 | Backend | Server Memory | Reduction |
 |---------|--------------|-----------|
-| No compression | 21.5 MB | — |
-| zstd (level 3) | 10.9 MB | 49.2% |
+| No compression | 21.4 MB | — |
+| zstd (level 3) | 10.9 MB | 49.3% |
 | LZ4 (level 0) | 15.5 MB | 27.8% |
 
-Zstd saves nearly twice as much memory as LZ4 on this JSON workload. But ~2KB JSON payloads are just one scenario. In practice, you're caching all kinds of data at all kinds of sizes. We benchmarked three common data types — JSON, HTML, and session data — across small, medium, and large value sizes to show what savings actually look like across real workloads.
+Zstd saves nearly twice as much memory as LZ4 on this JSON workload. These are total server memory reductions as reported by Valkey's `MEMORY USAGE` command — they include per-key overhead (key storage, metadata, allocator alignment) that doesn't compress, so the effective memory ratio is lower than the raw algorithm compression ratio you'd see compressing the same data outside of Valkey.
 
-### Memory Savings by Data Type and Value Size
-
-| Data Type | Value Size | Avg Bytes | zstd Savings | LZ4 Savings |
-|-----------|-----------|-----------|-------------|------------|
-| JSON | Small | 38 | 0.0% | 0.0% |
-| JSON | Medium | 98 | 0.8% | 0.0% |
-| JSON | Large | 461 | 27.6% | 15.0% |
-| JSON | Extra-Large | 1,884 | 49.3% | 31.8% |
-| HTML | Small | 193 | 20.0% | 10.5% |
-| HTML | Medium | 556 | 37.2% | 27.9% |
-| HTML | Large | 1,247 | 49.0% | 38.9% |
-| Session | Small | 198 | 11.8% | 0.0% |
-| Session | Medium | 480 | 16.9% | 0.0% |
-| Session | Large | 951 | 24.1% | 11.5% |
-
-A few patterns jump out:
-
-**Value size matters more than data type.** Below ~100 bytes, neither algorithm saves meaningful memory — the 5-byte header overhead and Valkey's per-key metadata dominate. Above ~500 bytes, both algorithms deliver substantial savings across all data types.
-
-**HTML compresses well.** Repeated tags, attributes, and structural patterns give both algorithms plenty to work with. Even small HTML fragments (~193 bytes) see 10–20% savings, and large fragments hit 39–49%.
-
-**Session data is the toughest.** Session payloads tend to be more random — UUIDs, tokens, timestamps — with less structural repetition. zstd still manages 12–24% savings, but LZ4 struggles with smaller session values (0% savings at ~200 and ~480 bytes) because the compressed output isn't smaller than the original after accounting for the header.
-
-**zstd consistently beats LZ4 on compression ratio.** Across every data type and size, zstd saves more memory. The gap is widest on highly compressible data and narrowest on small or low-redundancy data.
-
-These are total server memory reductions as reported by Valkey's `INFO memory` — they include per-key overhead (key storage, metadata, allocator alignment) that doesn't compress, so the effective memory ratio is lower than the raw algorithm compression ratio you'd see compressing the same data outside of Valkey.
-
-![Memory comparison: zstd vs LZ4 vs uncompressed](graph_parallel_memory.png)
-![Memory savings across data types](graph_memory_savings.png)
+![Memory savings: zstd vs LZ4](graph_memory_savings.png)
 
 ## The Core Tradeoff: Memory vs Throughput
 
 The two algorithms represent a clear tradeoff:
 
-- **LZ4** delivers 27.8% memory savings with effectively zero throughput impact. Across all configurations in our sweep, SET throughput ratio vs uncompressed ranged from 0.89x to 1.14x. Some configurations were actually *faster* with LZ4 because smaller payloads reduced network transfer time. Peak throughput with LZ4: 180K SET TPS / 245K GET TPS — identical to the uncompressed baseline.
+- **LZ4** delivers 27.8% memory savings with near-zero throughput impact. Across all 40 LZ4 configurations in our sweep, SET throughput ratio vs uncompressed ranged from 0.87x to 1.07x. Some configurations were actually *faster* with LZ4 because smaller payloads reduced network transfer time. Peak throughput with LZ4: 592K SET TPS / 811K GET TPS — matching or exceeding the uncompressed baseline.
 
-- **Zstd** delivers 49.2% memory savings but with a real CPU cost. SET throughput ratios ranged from 0.22x to 0.89x, and the pattern is consistent: the higher the baseline throughput, the worse the ratio. Without batching, zstd costs 11–42% of SET throughput. With aggressive batching, the cost grows because compression becomes CPU-bound.
+- **Zstd** delivers 49.3% memory savings with a moderate CPU cost. SET throughput ratios ranged from 0.41x to 0.97x. The cost is proportional to throughput: at low throughput (batch=1, no pipelining), zstd costs only 3–7%. At high throughput with batching, the cost grows as compression becomes a larger fraction of total per-operation time.
 
-Here's a representative slice at 4 parallel processes with 10 clients each:
+Here's a representative slice at 10 goroutines:
 
 | Batch Size | Baseline SET | zstd SET | zstd Ratio | LZ4 SET | LZ4 Ratio |
 |------------|-------------|----------|------------|---------|-----------|
-| 1 | 15,060 | 9,295 | 0.62x | 14,718 | 0.98x |
-| 5 | 58,401 | 22,268 | 0.38x | 56,327 | 0.98x |
-| 10 | 100,666 | 28,968 | 0.29x | 92,130 | 0.95x |
-| 20 | 143,629 | 34,010 | 0.24x | 128,227 | 0.90x |
+| 1 | 17,891 | 16,881 | 0.94x | 17,894 | 1.00x |
+| 5 | 82,951 | 74,472 | 0.90x | 83,842 | 1.01x |
+| 10 | 152,649 | 117,218 | 0.77x | 152,778 | 1.00x |
+| 20 | 275,326 | 172,454 | 0.63x | 260,032 | 0.94x |
+| 50 | 491,173 | 232,056 | 0.47x | 453,602 | 0.92x |
 
-It's clear that when batching pushes throughput higher, zstd's CPU cost becomes the bottleneck. LZ4 stays within a few percent of baseline across the board.
+At batch=1 (no pipelining), zstd costs just 6% — the network round-trip dominates and compression overhead is negligible. As batching pushes throughput higher, compression CPU time becomes a larger share of the total. LZ4 stays within a few percent of baseline across the board.
 
-![Compression overhead heatmap across configurations](graph_parallel_ratio_heatmap.png)
+![SET throughput comparison](graph_set_tps.png)
+![GET throughput comparison](graph_get_tps.png)
+![Throughput ratio: compressed vs baseline](graph_throughput_ratio.png)
 
-One important note: batching is the real throughput lever. Going from batch size 1 to 20 takes baseline SET throughput from 15K to 144K TPS — a 9.5x improvement that dwarfs any compression effect. Even with zstd, batched operations at B=20 outperform unbatched uncompressed operations by 2.3x. Optimize your batching strategy first, then choose your compression backend.
+## Scaling with Goroutines
 
-![Batch size impact on throughput](graph_parallel_batch_impact_c10.png)
+One of Go's strengths is effortless concurrency. Our benchmarks show that both compression backends scale cleanly with goroutine count up to the hardware limit (8 vCPUs):
+
+| Goroutines | Baseline SET | zstd SET | zstd Ratio | LZ4 SET | LZ4 Ratio |
+|------------|-------------|----------|------------|---------|-----------|
+| 1 | 18,205 | 13,327 | 0.73x | 17,058 | 0.94x |
+| 2 | 32,919 | 24,074 | 0.73x | 32,963 | 1.00x |
+| 4 | 63,996 | 50,648 | 0.79x | 61,789 | 0.97x |
+| 8 | 124,916 | 94,587 | 0.76x | 118,091 | 0.95x |
+| 10 | 146,831 | 117,218 | 0.80x | 152,778 | 1.04x |
+| 25 | 348,691 | 203,420 | 0.58x | 349,196 | 1.00x |
+| 100 | 498,108 | 204,558 | 0.41x | 484,338 | 0.97x |
+
+Zstd scales linearly from 1 to 8 goroutines (13K → 95K SET TPS, a 7.1x improvement on 8 cores), then plateaus around 200K as compression CPU saturates the available cores. LZ4 tracks the uncompressed baseline almost exactly at every goroutine count.
+
+![SET scaling: batch=1 vs batch=10](graph_scaling_set.png)
+![GET scaling: batch=1 vs batch=10](graph_scaling_get.png)
+
+## Batching Is the Real Throughput Lever
+
+Going from batch size 1 to 50 at 10 goroutines takes baseline SET throughput from 18K to 491K TPS — a 27x improvement that dwarfs any compression effect. Even with zstd compression, batched operations at batch=50 (232K TPS) outperform unbatched uncompressed operations (18K TPS) by 13x. Optimize your batching strategy first, then choose your compression backend.
+
+![Batch size impact on throughput](graph_batch_impact.png)
+
+## Latency
+
+At batch=1 (no pipelining), zstd adds a fraction of a millisecond to SET latency — from 0.50ms to 0.55ms p50 at 10 goroutines. LZ4 adds essentially nothing. At higher batch sizes, per-operation latency drops for all backends because batching amortizes round-trip cost.
+
+![Latency comparison](graph_latency.png)
 
 ## Choosing the Right Configuration
 
 **Start with LZ4** if throughput matters. Switch to zstd if you need maximum memory savings and have throughput headroom. The savings you'll see depend heavily on your data type and value size — HTML compresses best, session data compresses least, and anything under 100 bytes isn't worth compressing. Skip compression entirely for already-compressed data (images, video, pre-compressed content).
 
 For value sizes:
-- **Under 100 bytes**: Skip compression. Neither algorithm saves meaningful memory at this size — the 5-byte header overhead and Valkey's per-key metadata dominate (38-byte JSON = 0.0% savings, 98-byte JSON = 0.8% zstd / 0.0% LZ4).
-- **100–500 bytes**: Savings vary by data type. HTML compresses well even at ~193 bytes (20% zstd / 10.5% LZ4). Session data sees 12% zstd savings at ~198 bytes. LZ4 may not help at this size for session data (0% savings). Worth enabling with zstd; test with LZ4.
-- **500–1,000 bytes**: Solid savings across all data types. Expect 17–49% with zstd and 0–39% with LZ4 depending on data type. HTML compresses best; session data compresses least.
-- **Over 1,000 bytes**: Strongly recommended. Expect 24–50% with zstd and 12–39% with LZ4. JSON and HTML hit 49% zstd savings at 1.2–1.9KB.
+- **Under 100 bytes**: Skip compression. Neither algorithm saves meaningful memory at this size — the 5-byte header overhead and Valkey's per-key metadata dominate.
+- **100–500 bytes**: Savings vary by data type. HTML compresses well even at ~193 bytes (20% zstd / 10.5% LZ4). Worth enabling with zstd; test with LZ4.
+- **500–1,000 bytes**: Solid savings across all data types. Expect 17–49% with zstd and 0–39% with LZ4 depending on data type.
+- **Over 1,000 bytes**: Strongly recommended. Expect 24–50% with zstd and 12–39% with LZ4.
 
-For batched operations: prefer LZ4. Zstd throughput drops significantly as batch size increases.
+For batched operations: prefer LZ4. Zstd throughput drops as batch size increases because compression CPU becomes the bottleneck.
 
 Here's a complete configuration example:
 
-```python
-from glide import (
-    GlideClient,
-    GlideClientConfiguration,
-    NodeAddress,
-    CompressionConfiguration,
-    CompressionBackend,
+```go
+import (
+    glide "github.com/valkey-io/valkey-glide/go/v2"
+    "github.com/valkey-io/valkey-glide/go/v2/config"
 )
 
-config = GlideClientConfiguration(
-    addresses=[NodeAddress(host="localhost", port=6379)],
-    compression=CompressionConfiguration(
-        enabled=True,
-        backend=CompressionBackend.LZ4,     # or CompressionBackend.ZSTD
-        compression_level=0,                 # lz4: -128 to 12; zstd: -131072 to 22
-        min_compression_size=64              # Skip values smaller than 64 bytes
+cfg := config.NewClientConfiguration().
+    WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
+    WithCompressionConfiguration(
+        config.NewCompressionConfiguration().
+            WithBackend(config.LZ4).          // or config.ZSTD
+            WithCompressionLevel(0).          // lz4: -128 to 12; zstd: -131072 to 22
+            WithMinCompressionSize(64),       // Skip values smaller than 64 bytes
     )
-)
 
-client = await GlideClient.create(config)
+client, err := glide.NewClient(cfg)
 ```
 
-Compression works identically with `GlideClusterClient` — just pass the same `CompressionConfiguration` to your cluster config.
+Compression works identically with `ClusterClient` — just pass the same compression configuration to your cluster config.
 
 ## Gradual Rollout
 
@@ -165,10 +165,10 @@ One of the most practical aspects of GLIDE's compression design is that you don'
 
 ## Conclusion
 
-Transparent compression gives you a meaningful reduction in memory usage with minimal effort. LZ4 is effectively free at 28% savings; zstd nearly halves memory at the cost of write throughput. The feature is available today across all GLIDE language bindings and requires only a single configuration change.
+Transparent compression gives you a meaningful reduction in memory usage with minimal effort. LZ4 is effectively free at 28% savings; zstd nearly halves memory at a moderate write throughput cost that scales predictably with goroutine count. The feature is available today across all GLIDE language bindings and requires only a single configuration change.
 
 We'd love to hear about your experience with compression — what data types you're compressing, what savings you're seeing, and what would make the feature more useful. Join the conversation on [GitHub Discussions](https://github.com/valkey-io/valkey-glide/discussions).
 
 To get started:
 - [Valkey GLIDE GitHub Repository](https://github.com/valkey-io/valkey-glide)
-- [Compression Benchmark Tool & Data](https://github.com/valkey-io/valkey-glide/tree/main/benchmarks/compression_benchmark)
+- [Go Compression Benchmark Tool & Data](https://github.com/valkey-io/valkey-glide/tree/main/benchmarks/compression_benchmark)
