@@ -120,7 +120,7 @@ The heatmap below shows the full picture — SET throughput ratio (compressed / 
 
 ## Scaling with Goroutines
 
-One of Go's strengths is effortless concurrency. Our benchmarks show that both compression backends scale cleanly with goroutine count up to the hardware limit (8 vCPUs):
+One of Go's strengths is effortless concurrency. Our benchmarks show that both compression backends scale cleanly with goroutine count up to the hardware limit (8 vCPUs). The table below uses batch size 10:
 
 | Goroutines | Baseline SET | zstd SET | zstd Ratio | LZ4 SET | LZ4 Ratio |
 |------------|-------------|----------|------------|---------|-----------|
@@ -133,6 +133,21 @@ One of Go's strengths is effortless concurrency. Our benchmarks show that both c
 | 100 | 498,108 | 204,558 | 0.41x | 484,338 | 0.97x |
 
 Zstd scales linearly from 1 to 8 goroutines (13K → 95K SET TPS, a 7.1x improvement on 8 cores), then plateaus around 200K as compression CPU saturates the available cores. LZ4 tracks the uncompressed baseline almost exactly at every goroutine count.
+
+Not every workload can use batching. For request-per-request patterns (batch=1), here's how throughput scales with goroutines alone:
+
+| Goroutines | Baseline SET | zstd SET | zstd Ratio | LZ4 SET | LZ4 Ratio |
+|------------|-------------|----------|------------|---------|-----------|
+| 1 | 2,047 | 1,807 | 0.93x | 2,093 | 1.02x |
+| 2 | 3,664 | 3,810 | 1.04x | 3,922 | 1.10x |
+| 4 | 7,742 | 7,257 | 0.95x | 7,435 | 0.96x |
+| 8 | 14,933 | 14,624 | 0.98x | 14,698 | 0.98x |
+| 10 | 18,511 | 16,881 | 0.94x | 17,894 | 0.97x |
+| 25 | 41,797 | 40,007 | 0.96x | 42,457 | 1.02x |
+| 100 | 121,733 | 79,603 | 0.66x | 117,093 | 0.96x |
+| 1,000 | 110,166 | 78,429 | 0.71x | 112,980 | 1.39x |
+
+Without batching, throughput is network-latency-bound at low goroutine counts — a single goroutine tops out around 2K TPS (~0.49ms per round-trip). Scaling to 100 goroutines pushes baseline to 122K SET TPS. Both zstd and LZ4 show minimal overhead in this regime because the network round-trip dominates per-operation time. At 1,000 goroutines, contention introduces significant run-to-run variance — the LZ4 ratio above 1.0x reflects noisy baselines rather than compression making operations faster.
 
 ![SET scaling: batch=1 vs batch=10](graph_scaling_set.png)
 ![GET scaling: batch=1 vs batch=10](graph_scaling_get.png)
