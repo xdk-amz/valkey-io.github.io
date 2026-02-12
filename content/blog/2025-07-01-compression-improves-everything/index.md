@@ -66,10 +66,9 @@ Zstd saves nearly twice as much memory as LZ4 on this JSON workload. But ~2KB JS
 
 | Data Type | Value Size | Avg Bytes | zstd Savings | LZ4 Savings |
 |-----------|-----------|-----------|-------------|------------|
-| JSON | Small | 38 | 0.0% | 0.0% |
-| JSON | Medium | 98 | 0.8% | 0.0% |
-| JSON | Large | 461 | 27.6% | 15.0% |
-| JSON | Extra-Large | 1,884 | 49.3% | 31.8% |
+| JSON | Small | 98 | 0.8% | 0.0% |
+| JSON | Medium | 461 | 27.6% | 15.0% |
+| JSON | Large | 1,884 | 49.3% | 31.8% |
 | HTML | Small | 193 | 20.0% | 10.5% |
 | HTML | Medium | 556 | 37.2% | 27.9% |
 | HTML | Large | 1,247 | 49.0% | 38.9% |
@@ -87,7 +86,7 @@ A few patterns jump out:
 
 **zstd consistently beats LZ4 on compression ratio.** Across every data type and size, zstd saves more memory. The gap is widest on highly compressible data and narrowest on small or low-redundancy data.
 
-![Memory savings: zstd vs LZ4](graph_memory_savings.png)
+![Memory savings by data type and value size](graph_memory_by_type.png)
 
 ## The Core Tradeoff: Memory vs Throughput
 
@@ -114,6 +113,10 @@ At batch=1 (no pipelining), zstd costs just 6% — the network round-trip domina
 ![SET throughput comparison](graph_set_tps.png)
 ![GET throughput comparison](graph_get_tps.png)
 ![Throughput ratio: compressed vs baseline](graph_throughput_ratio.png)
+
+The heatmap below shows the full picture — SET throughput ratio (compressed / baseline) across every goroutine count and batch size combination we tested. Green cells mean compression added no meaningful overhead or was actually faster; red cells indicate where compression CPU cost dominated. LZ4 is green almost everywhere, while zstd shows a clear gradient: low overhead at small batch sizes (where network latency dominates) and increasing cost as batching pushes throughput higher.
+
+![SET compression overhead heatmap](graph_ratio_heatmap.png)
 
 ## Scaling with Goroutines
 
@@ -193,3 +196,125 @@ We'd love to hear about your experience with compression — what data types you
 To get started:
 - [Valkey GLIDE GitHub Repository](https://github.com/valkey-io/valkey-glide)
 - [Go Compression Benchmark Tool & Data](https://github.com/valkey-io/valkey-glide/tree/main/benchmarks/compression_benchmark)
+
+
+
+## Appendix: Sample Data from the Benchmark Corpus
+
+The following are representative values from the `example_data/` corpus used in the benchmarks above. Each sample corresponds to a row in the [Memory Savings by Data Type and Value Size](#memory-savings-by-data-type-and-value-size) table.
+
+### JSON — Large (462 bytes)
+
+A database proxy configuration object, typical of application config cached in Valkey:
+
+```json
+{
+  "config_id": "CONFIG-2024-002",
+  "service": "database-proxy",
+  "environment": "production",
+  "version": "1.8.2",
+  "updated_at": "2024-03-14T15:30:00Z",
+  "updated_by": "EMP-2024-004",
+  "settings": {
+    "pool_size": 100,
+    "connection_timeout_seconds": 10,
+    "idle_timeout_seconds": 300,
+    "max_lifetime_seconds": 3600,
+    "enable_ssl": true,
+    "read_replica_enabled": true,
+    "read_write_split": true,
+    "query_timeout_seconds": 30,
+    "slow_query_threshold_ms": 1000,
+    "log_level": "WARN"
+  }
+}
+```
+
+### HTML — Small (193 bytes)
+
+A compact product-card snippet, the kind of HTML fragment commonly cached for storefront rendering:
+
+```html
+<div class="product-card">
+  <h3 class="title">External SSD 1TB Fast</h3>
+  <span class="price">$109.99</span>
+  <p class="desc">High speed storage</p>
+  <button class="btn-cart">Add to Cart</button>
+</div>
+```
+
+### HTML — Large (1,245 bytes)
+
+A fully-decorated product card with badges, image overlays, ratings, pricing, and stock metadata:
+
+```html
+<div class="product-card" data-id="prod-10023" data-category="cables"
+     data-brand="ConnectPro">
+  <div class="product-badge">
+    <span class="badge-sale">Sale</span>
+    <span class="badge-shipping">Free Shipping</span>
+  </div>
+  <div class="product-image">
+    <img src="/images/products/hdmi-cable.jpg" alt="HDMI Cable 4K 6ft"
+         loading="lazy" width="300" height="300"/>
+    <div class="image-overlay">
+      <button class="btn-quickview" data-modal="quickview">Quick View</button>
+      <button class="btn-wishlist" data-action="wishlist">
+        <i class="icon-heart"></i>
+      </button>
+    </div>
+  </div>
+  <div class="product-info">
+    <h3 class="title">
+      <a href="/products/hdmi-cable">HDMI Cable 4K 6ft</a>
+    </h3>
+    <div class="rating">
+      <span class="stars">★★★★☆</span>
+      <span class="rating-value">4.6</span>
+      <span class="count">(3,234 reviews)</span>
+    </div>
+    <div class="price-container">
+      <span class="price">$14.99</span>
+      <span class="original-price">$24.99</span>
+      <span class="discount">-40%</span>
+    </div>
+    <p class="desc">High bandwidth video with gold plated connectors
+      and braided nylon jacket</p>
+    <div class="product-meta">
+      <span class="stock in-stock">In Stock</span>
+      <span class="sku">SKU: HC-10023</span>
+    </div>
+    <button class="btn-cart" data-action="add"
+            data-product="prod-10023">Add to Cart</button>
+  </div>
+</div>
+```
+
+### Session — Medium (480 bytes)
+
+A user session object with preferences, shopping cart, browsing history, and a JWT token:
+
+```json
+{
+  "uid": "u_9d4e3f2a",
+  "sid": "sess_8a5b0c3d2e4f6b9c",
+  "ts": 1706284821,
+  "exp": 1706371221,
+  "ip": "192.168.8.45",
+  "ua": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_7 like Mac OS X) AppleWebKit",
+  "role": "user",
+  "prefs": {
+    "theme": "dark",
+    "lang": "cs",
+    "tz": "Europe/Prague",
+    "notify": false
+  },
+  "cart": [
+    { "id": 56, "qty": 1, "price": 244.99 },
+    { "id": 12, "qty": 2, "price": 42.99 }
+  ],
+  "last": "/account/addresses/add",
+  "history": ["/acct", "/addr", "/add"],
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5OTAwMTEyMjMzIn0"
+}
+```
