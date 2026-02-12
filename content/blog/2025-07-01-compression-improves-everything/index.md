@@ -50,12 +50,9 @@ A few safety-by-default choices keep compression from ever getting in the way: i
 
 ## Benchmark Results
 
-We benchmarked compression using the Go GLIDE client on Amazon EC2 r7g.2xlarge instances (8 vCPUs, 64 GB RAM, AWS Graviton3) with the client and Valkey 8.0 server running on separate hosts in the same AWS VPC. The test corpus was JSON documents averaging ~1,884 bytes per value. We swept a matrix of 80 configurations across goroutine counts (1, 2, 4, 8, 10, 25, 100, 1000) and pipeline batch sizes (1, 5, 10, 20, 50).
-
-
 ## Memory Savings
 
-The headline numbers are consistent regardless of throughput or concurrency — they depend only on the data and the algorithm:
+The headline memory savings figures are the result of compressing 10,000 ~2KB JSON payloads and measuring Valkey's used_memory metric:
 
 | Backend | Server Memory | Reduction |
 |---------|--------------|-----------|
@@ -63,11 +60,38 @@ The headline numbers are consistent regardless of throughput or concurrency — 
 | zstd (level 3) | 10.9 MB | 49.3% |
 | LZ4 (level 0) | 15.5 MB | 27.8% |
 
-Zstd saves nearly twice as much memory as LZ4 on this JSON workload. These are total server memory reductions as reported by Valkey's `MEMORY USAGE` command — they include per-key overhead (key storage, metadata, allocator alignment) that doesn't compress, so the effective memory ratio is lower than the raw algorithm compression ratio you'd see compressing the same data outside of Valkey.
+Zstd saves nearly twice as much memory as LZ4 on this JSON workload. But ~2KB JSON payloads are just one scenario and not representative of the typical size of data you might be working with. In practice, you're caching all kinds of data at all kinds of sizes. Below are the results for three common data types — JSON, HTML, and session data — across a variety of value sizes to show what savings actually look like across real workloads.
+
+### Memory Savings by Data Type and Value Size
+
+| Data Type | Value Size | Avg Bytes | zstd Savings | LZ4 Savings |
+|-----------|-----------|-----------|-------------|------------|
+| JSON | Small | 38 | 0.0% | 0.0% |
+| JSON | Medium | 98 | 0.8% | 0.0% |
+| JSON | Large | 461 | 27.6% | 15.0% |
+| JSON | Extra-Large | 1,884 | 49.3% | 31.8% |
+| HTML | Small | 193 | 20.0% | 10.5% |
+| HTML | Medium | 556 | 37.2% | 27.9% |
+| HTML | Large | 1,247 | 49.0% | 38.9% |
+| Session | Small | 198 | 11.8% | 0.0% |
+| Session | Medium | 480 | 16.9% | 0.0% |
+| Session | Large | 951 | 24.1% | 11.5% |
+
+A few patterns jump out:
+
+**Value size matters more than data type.** Below ~100 bytes, neither algorithm saves meaningful memory — the 5-byte header overhead and Valkey's per-key metadata dominate. Above ~500 bytes, both algorithms deliver substantial savings across all data types.
+
+**HTML compresses well.** Repeated tags, attributes, and structural patterns give both algorithms plenty to work with. Even small HTML fragments (~193 bytes) see 10–20% savings, and large fragments hit 39–49%.
+
+**Session data is the toughest.** Session payloads tend to be more random — UUIDs, tokens, timestamps — with less structural repetition. zstd still manages 12–24% savings, but LZ4 struggles with smaller session values (0% savings at ~200 and ~480 bytes) because the compressed output isn't smaller than the original after accounting for the header.
+
+**zstd consistently beats LZ4 on compression ratio.** Across every data type and size, zstd saves more memory. The gap is widest on highly compressible data and narrowest on small or low-redundancy data.
 
 ![Memory savings: zstd vs LZ4](graph_memory_savings.png)
 
 ## The Core Tradeoff: Memory vs Throughput
+
+We benchmarked performance using the Go GLIDE client on Amazon EC2 r7g.2xlarge instances (8 vCPUs, 64 GB RAM, AWS Graviton3) with the client and Valkey 8.0 server running on separate hosts in the same AWS VPC. The test corpus was JSON payloads averaging ~1,884 bytes per value. We swept a matrix of 80 configurations across goroutine counts (1, 2, 4, 8, 10, 25, 100, 1000) and pipeline batch sizes (1, 5, 10, 20, 50).
 
 The two algorithms represent a clear tradeoff:
 
