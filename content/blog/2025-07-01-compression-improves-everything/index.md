@@ -31,7 +31,7 @@ client.Set(ctx, "user:1001:profile", string(userDataJSON))
 result, _ := client.Get(ctx, "user:1001:profile")
 ```
 
-In our benchmarks using the Go client, this single configuration change delivered 28–49% memory savings depending on algorithm choice, with LZ4 showing near-zero throughput impact and Zstandard (zstd) nearly halving memory usage at a moderate write throughput cost. This post walks through how the feature works, what the benchmarks show, and how to choose the right settings for your workload.
+In our benchmarks using the Go client, this single configuration change delivered 28–49% memory savings depending on algorithm choice and data shape, with LZ4 showing near-zero throughput impact and Zstandard (zstd) nearly halving memory usage at a moderate write throughput cost. This post walks through how the feature works, what the benchmarks show, and how to choose the right settings for your workload.
 
 ## How It Works
 
@@ -50,11 +50,8 @@ A few safety-by-default choices keep compression from ever getting in the way: i
 
 ## Benchmark Results
 
-We benchmarked compression using the Go GLIDE client on Amazon EC2 r7g.2xlarge instances (8 vCPUs, 64 GB RAM, AWS Graviton3) with the client and Valkey 8.0 server in the same AWS VPC. The test corpus was JSON documents averaging ~1,884 bytes per value. We swept a matrix of 80 configurations across goroutine counts (1, 2, 4, 8, 10, 25, 100, 1000) and pipeline batch sizes (1, 5, 10, 20, 50).
+We benchmarked compression using the Go GLIDE client on Amazon EC2 r7g.2xlarge instances (8 vCPUs, 64 GB RAM, AWS Graviton3) with the client and Valkey 8.0 server running on separate hosts in the same AWS VPC. The test corpus was JSON documents averaging ~1,884 bytes per value. We swept a matrix of 80 configurations across goroutine counts (1, 2, 4, 8, 10, 25, 100, 1000) and pipeline batch sizes (1, 5, 10, 20, 50).
 
-Unlike the Python client which needs separate parallel processes to work around the GIL, Go handles all concurrency natively via goroutines. Each goroutine gets its own GLIDE client, which maps to its own Rust Tokio runtime under the hood — this allows compression work to parallelize across OS threads without any special configuration.
-
-The compression itself happens in Rust via FFI and is identical across all GLIDE language bindings.
 
 ## Memory Savings
 
