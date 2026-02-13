@@ -92,27 +92,16 @@ A few patterns jump out:
 
 We benchmarked performance using the Go GLIDE client on Amazon EC2 r7g.2xlarge instances (8 vCPUs, 64 GB RAM, AWS Graviton3) with the client and Valkey 8.0 server running on separate hosts in the same AWS VPC. The test corpus was JSON payloads averaging ~1,884 bytes per value. We swept a matrix of 80 configurations across goroutine counts (1, 2, 4, 8, 10, 25, 100, 1000) and pipeline batch sizes (1, 5, 10, 20, 50).
 
+Here's how throughput scales with goroutines for batch sizes 1 and 10:
+
+![SET scaling: batch=1 vs batch=10](graph_scaling_set.png)
+![GET scaling: batch=1 vs batch=10](graph_scaling_get.png)
+
 The two algorithms represent a clear tradeoff:
 
 - **LZ4** delivers 27.8% memory savings with near-zero throughput impact. Across all 40 LZ4 configurations in our sweep, SET throughput ratio vs uncompressed ranged from 0.87x to 1.07x. Some configurations were actually *faster* with LZ4 because smaller payloads reduced network transfer time. Peak throughput with LZ4: 592K SET TPS / 811K GET TPS — matching or exceeding the uncompressed baseline.
 
-- **Zstd** delivers 49.3% memory savings with a moderate CPU cost. SET throughput ratios ranged from 0.41x to 0.97x. The cost is proportional to throughput: at low throughput (batch=1, no pipelining), zstd costs only 3–7%. At high throughput with batching, the cost grows as compression becomes a larger fraction of total per-operation time.
-
-Here's a representative slice at 10 goroutines:
-
-| Batch Size | Baseline SET | zstd SET | zstd Ratio | LZ4 SET | LZ4 Ratio |
-|------------|-------------|----------|------------|---------|-----------|
-| 1 | 17,891 | 16,881 | 0.94x | 17,894 | 1.00x |
-| 5 | 82,951 | 74,472 | 0.90x | 83,842 | 1.01x |
-| 10 | 152,649 | 117,218 | 0.77x | 152,778 | 1.00x |
-| 20 | 275,326 | 172,454 | 0.63x | 260,032 | 0.94x |
-| 50 | 491,173 | 232,056 | 0.47x | 453,602 | 0.92x |
-
-At batch=1 (no pipelining), zstd costs just 6% — the network round-trip dominates and compression overhead is negligible. As batching pushes throughput higher, compression CPU time becomes a larger share of the total. LZ4 stays within a few percent of baseline across the board.
-
-![SET throughput comparison](graph_set_tps.png)
-![GET throughput comparison](graph_get_tps.png)
-![Throughput ratio: compressed vs baseline](graph_throughput_ratio.png)
+- **Zstd** delivers 49.3% memory savings with a moderate CPU cost. SET throughput ratios ranged from 0.41x to 0.97x. The cost is proportional to throughput: at low throughput, zstd costs only 3–7%. At high throughput with batching, the cost grows as compression becomes a larger fraction of total per-operation time.
 
 The heatmap below shows the full picture — SET throughput ratio (compressed / baseline) across every goroutine count and batch size combination we tested. Green cells mean compression added no meaningful overhead or was actually faster; red cells indicate where compression CPU cost dominated. LZ4 is green almost everywhere, while zstd shows a clear gradient: low overhead at small batch sizes (where network latency dominates) and increasing cost as batching pushes throughput higher.
 
@@ -147,10 +136,7 @@ Not every workload can use batching. For request-per-request patterns (batch=1),
 | 100 | 121,733 | 79,603 | 0.66x | 117,093 | 0.96x |
 | 1,000 | 110,166 | 78,429 | 0.71x | 112,980 | 1.39x |
 
-Without batching, throughput is network-latency-bound at low goroutine counts — a single goroutine tops out around 2K TPS (~0.49ms per round-trip). Scaling to 100 goroutines pushes baseline to 122K SET TPS. Both zstd and LZ4 show minimal overhead in this regime because the network round-trip dominates per-operation time. At 1,000 goroutines, contention introduces significant run-to-run variance — the LZ4 ratio above 1.0x reflects noisy baselines rather than compression making operations faster.
-
-![SET scaling: batch=1 vs batch=10](graph_scaling_set.png)
-![GET scaling: batch=1 vs batch=10](graph_scaling_get.png)
+Without batching, throughput is network-latency-bound at low goroutine counts — a single goroutine tops out around 2K TPS (~0.49ms per round-trip). Scaling to 100 goroutines pushes baseline to 122K SET TPS. Both zstd and LZ4 show minimal overhead in this configuration because the network round-trip dominates per-operation time. At 1,000 goroutines, contention introduces significant run-to-run variance. The LZ4 ratio above 1.0x reflects noisy baselines rather than compression making operations faster.
 
 ## Batching Is the Real Throughput Lever
 
