@@ -115,8 +115,25 @@ Going from batch size 1 to 50 at 10 goroutines takes baseline SET throughput fro
 
 At batch=1 (no pipelining), zstd adds a fraction of a millisecond to SET latency — from 0.50ms to 0.55ms p50 at 10 goroutines. LZ4 adds essentially nothing. At higher batch sizes, total batch latency — the time a client actually waits for a response — grows for all backends. At batch=10 with 10 goroutines, baseline batch latency rises to ~0.62ms, zstd to ~0.80ms, and LZ4 stays at ~0.62ms. The cost of zstd scales with the number of values compressed per batch, while LZ4 remains close to baseline throughout.
 
-![Batch latency comparison](graph_latency.png)
+![Batch latency comparison — remote server, nodivide](graph_latency_rerun_remote_nodivide.png)
 
+SET batch latency — nodivide (true client wait time, ms):
+
+| Config | No Comp p50 | No Comp p95 | zstd p50 | zstd p95 | lz4 p50 | lz4 p95 |
+|--------|-------------|-------------|----------|----------|---------|----------|
+| 10g, b=1 | 0.53 | 0.58 | 0.53 | 0.59 | 0.53 | 0.58 |
+| 10g, b=10 | 0.62 | 0.69 | 0.83 | 0.90 | 0.62 | 0.69 |
+| 100g, b=1 | 0.75 | 1.11 | 1.11 | 2.35 | 0.77 | 1.16 |
+| 100g, b=10 | 1.82 | 2.32 | 2.67 | 12.74 | 1.11 | 4.79 |
+
+GET batch latency — nodivide (true client wait time, ms):
+
+| Config | No Comp p50 | No Comp p95 | zstd p50 | zstd p95 | lz4 p50 | lz4 p95 |
+|--------|-------------|-------------|----------|----------|---------|----------|
+| 10g, b=1 | 0.53 | 0.58 | 0.51 | 0.57 | 0.52 | 0.58 |
+| 10g, b=10 | 0.61 | 0.68 | 0.59 | 0.65 | 0.59 | 0.66 |
+| 100g, b=1 | 0.79 | 1.17 | 0.84 | 1.24 | 0.80 | 1.19 |
+| 100g, b=10 | 1.71 | 3.67 | 1.57 | 3.18 | 1.57 | 3.44 |
 ## Choosing the Right Configuration
 
 **Start with LZ4** if latency matters. Switch to zstd if you need maximum memory savings and can take a slight hit to latency. The savings you'll see depend heavily on your data type and value size — HTML compresses best, session data compresses least, and anything under 100 bytes isn't worth compressing. Skip compression entirely for already-compressed data (images, video, pre-compressed content).
